@@ -1,10 +1,7 @@
-//! "Launch at startup" — register the app to run at Windows login.
+//! "Launch at startup" — register the app to run at user login.
 //!
-//! Uses the per-user `Run` key
-//! (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`), so no admin
-//! rights are needed. The registry is the single source of truth for this
-//! setting — it is queried on launch and written the moment the toggle
-//! changes, rather than being mirrored into `config.json`.
+//! Windows uses the per-user `Run` registry key. macOS uses a per-user
+//! LaunchAgent plist in `~/Library/LaunchAgents`. No admin rights are needed.
 
 /// Registry value name under the `Run` key. Uniquely identifies our entry.
 #[cfg(windows)]
@@ -37,9 +34,8 @@ mod imp {
         let mut hkey: HKEY = ptr::null_mut();
         // SAFETY: valid null-terminated subkey; hkey is a live out-param.
         // The 3rd arg (ulOptions) is reserved for RegOpenKeyExW and must be 0.
-        let status = unsafe {
-            RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, access, &mut hkey)
-        };
+        let status =
+            unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, access, &mut hkey) };
         if status == ERROR_SUCCESS {
             Ok(hkey)
         } else {
@@ -50,8 +46,7 @@ mod imp {
     /// Absolute path to the running executable, wrapped in quotes so a path
     /// containing spaces survives the shell that Windows uses at login.
     fn quoted_exe_path() -> Result<String, String> {
-        let exe = std::env::current_exe()
-            .map_err(|e| format!("current_exe failed: {e}"))?;
+        let exe = std::env::current_exe().map_err(|e| format!("current_exe failed: {e}"))?;
         Ok(format!("\"{}\"", exe.display()))
     }
 
@@ -129,18 +124,95 @@ mod imp {
     }
 }
 
-// ── Non-Windows stubs ────────────────────────────────────────────────────────
-//
-// The feature is Windows-only; these keep the app compiling on macOS.
+// ── macOS implementation ─────────────────────────────────────────────────────
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod imp {
+    use std::fs;
+    use std::path::PathBuf;
+
+    const LABEL: &str = "com.claude-timer-reset.app";
+    const PLIST_NAME: &str = "com.claude-timer-reset.app.plist";
+
+    fn plist_path() -> Result<PathBuf, String> {
+        let home = std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
+        let dir = PathBuf::from(home).join("Library").join("LaunchAgents");
+        fs::create_dir_all(&dir)
+            .map_err(|e| format!("could not create LaunchAgents directory: {e}"))?;
+        Ok(dir.join(PLIST_NAME))
+    }
+
+    fn current_exe() -> Result<PathBuf, String> {
+        std::env::current_exe().map_err(|e| format!("current_exe failed: {e}"))
+    }
+
+    fn plist_xml(exe: &std::path::Path) -> String {
+        let working_dir = exe
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "/".into());
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>WorkingDirectory</key>
+    <string>{}</string>
+</dict>
+</plist>
+"#,
+            xml_escape(LABEL),
+            xml_escape(&exe.to_string_lossy()),
+            xml_escape(&working_dir)
+        )
+    }
+
+    fn xml_escape(s: &str) -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&apos;")
+    }
+
+    pub fn is_enabled() -> bool {
+        plist_path().is_ok_and(|path| path.exists())
+    }
+
+    pub fn set_enabled(enable: bool) -> Result<(), String> {
+        let path = plist_path()?;
+        if enable {
+            let exe = current_exe()?;
+            fs::write(&path, plist_xml(&exe))
+                .map_err(|e| format!("could not write LaunchAgent: {e}"))
+        } else if path.exists() {
+            fs::remove_file(&path).map_err(|e| format!("could not remove LaunchAgent: {e}"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+// ── Other platforms ──────────────────────────────────────────────────────────
+//
+// Keep the app compiling on Linux/BSD without promising a login integration.
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 mod imp {
     pub fn is_enabled() -> bool {
         false
     }
 
     pub fn set_enabled(_enable: bool) -> Result<(), String> {
-        Err("Launch at startup is only supported on Windows".into())
+        Err("Launch at startup is only supported on Windows and macOS".into())
     }
 }
 
@@ -152,4 +224,14 @@ pub fn is_enabled() -> bool {
 /// Register (`true`) or unregister (`false`) the app for launch at login.
 pub fn set_enabled(enable: bool) -> Result<(), String> {
     imp::set_enabled(enable)
+}
+
+pub fn checkbox_label() -> &'static str {
+    if cfg!(windows) {
+        "Run when Windows starts"
+    } else if cfg!(target_os = "macos") {
+        "Run when macOS starts"
+    } else {
+        "Run at login"
+    }
 }

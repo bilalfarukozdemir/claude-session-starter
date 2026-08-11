@@ -26,7 +26,7 @@ Close the window and it keeps working from the system tray. Left-click the tray 
 ### Windows
 
 1. Download `claude-timer-reset.exe` from the [latest release](https://github.com/ozkanerbatuhan/claude-session-starter/releases/latest) (or build from source) and run it.
-2. Open **Settings** if you need to change anything (defaults work for standard npm installs):
+2. Open **Settings** if you need to change anything.
 
    | Setting | Default | Notes |
    |---|---|---|
@@ -35,18 +35,22 @@ Close the window and it keeps working from the system tray. Left-click the tray 
    | Claude path | auto-detected | Absolute path to `claude.cmd` / `claude` if detection fails |
    | Check interval | 60 min | How often `/usage` is polled |
    | Wait after reset | 60 s | Cooldown after the reset time before triggering |
-   | Launch at startup | off | Run the app automatically at Windows login (per-user, no admin needed) |
+   | Launch at startup | off | Run the app automatically at user login (per-user, no admin needed) |
 
-3. Press **Start**. The app checks usage, schedules the countdown, and takes it from there. Settings (including the running state) persist to `config.json` next to the app, so it resumes automatically on next launch.
+3. Press **Start**. The app checks usage, schedules the countdown, and takes it from there. Settings (including the running state) persist in the per-user app data folder, so it resumes automatically on next launch.
 
 ### macOS
 
-Build from source (see below) — the tray, window handling, and CLI detection (`~/.claude/local`, `~/.local/bin`, Homebrew paths) are wired for macOS, but this platform hasn't been battle-tested yet. Issues welcome.
+Build from source (see below), then run the binary:
 
 ```bash
 cargo build --release
 ./target/release/claude-timer-reset
 ```
+
+The app auto-detects Claude from common native installer, npm, and Homebrew locations. If Claude was installed through a shell-managed path such as `nvm`, the app also asks your login shell where `claude` lives, so it still works when launched from Finder or at login.
+
+The **Launch at startup** toggle writes a per-user LaunchAgent at `~/Library/LaunchAgents/com.claude-timer-reset.app.plist`.
 
 ## Building from source
 
@@ -56,12 +60,17 @@ Requires [Rust](https://rustup.rs/) (stable).
 cargo build --release
 ```
 
-The optimized binary lands in `target/release/`. To get the custom tray icon, keep an `assets/icon.png` next to the binary (a built-in fallback icon is used otherwise).
+The optimized binary lands in `target/release/`.
 
 ## Requirements
 
 - Windows 10/11 or macOS
 - Claude CLI installed and authenticated (`npm install -g @anthropic-ai/claude-code`)
+
+## Data files
+
+- Windows: `%LOCALAPPDATA%\claude-timer-reset\config.json` and `app.log`
+- macOS: `~/Library/Application Support/Claude Timer Reset/config.json` and `app.log`
 
 ## Architecture
 
@@ -72,8 +81,8 @@ src/
 ├── scheduler.rs      # background thread: usage checks + countdown + trigger
 ├── claude_runner.rs  # Claude CLI subprocess wrapper (hidden console)
 ├── usage_parser.rs   # parses `/usage` output (percentages, reset time)
-├── startup.rs        # "launch at login" via the Windows Run registry key
-├── logger.rs         # persistent app.log with auto-trim (%LOCALAPPDATA%\claude-timer-reset)
+├── startup.rs        # "launch at login" via Windows Run key or macOS LaunchAgent
+├── logger.rs         # persistent app.log with auto-trim
 ├── updater.rs        # in-app self-update from GitHub Releases
 └── config.rs         # config.json persistence + CLI auto-detection
 ```

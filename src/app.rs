@@ -62,8 +62,8 @@ pub struct App {
     edit_claude_path: String,
     edit_check_interval: String,
     edit_cooldown: String,
-    // Whether the app is registered to launch at Windows login. Mirrors the
-    // registry (the source of truth); toggling writes it through immediately.
+    // Whether the app is registered to launch at login. Mirrors the platform
+    // source of truth; toggling writes it through immediately.
     launch_at_startup: bool,
 
     // Self-update
@@ -248,22 +248,24 @@ impl App {
         cc.egui_ctx.set_visuals(visuals);
 
         // ── Config ──
-        // Anchor config.json to the exe's directory, not the working directory:
-        // when launched from the Windows Run key (launch at startup) the cwd is
-        // C:\Windows\System32, where the config can be neither found nor saved.
-        let config_path = std::env::current_exe()
+        // Keep config in a per-user app-data folder. GUI apps launched by
+        // macOS launchd (or Windows startup) often have an unhelpful cwd, and
+        // app install folders may not be writable.
+        let config_path = crate::config::default_config_path();
+        let exe_config_path = std::env::current_exe()
             .ok()
-            .and_then(|exe| exe.parent().map(|d| d.join("config.json")))
-            .unwrap_or_else(|| PathBuf::from("config.json"));
-        // Migrate a config.json from the old cwd-based location: load it once;
-        // the next save lands next to the exe.
+            .and_then(|exe| exe.parent().map(|d| d.join("config.json")));
         let legacy_path = std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join("config.json");
-        let config = if !config_path.exists() && legacy_path.exists() {
+        let config = if config_path.exists() {
+            Config::load(&config_path)
+        } else if let Some(path) = exe_config_path.as_ref().filter(|p| p.exists()) {
+            Config::load(path)
+        } else if legacy_path.exists() {
             Config::load(&legacy_path)
         } else {
-            Config::load(&config_path)
+            Config::default()
         };
 
         crate::logger::log(&format!(
@@ -320,8 +322,8 @@ impl App {
         #[cfg(not(windows))]
         let tray_icon = build_tray(hwnd, &cc.egui_ctx, should_close.clone());
 
-        // Refresh the Run-key entry so it always points at the current exe
-        // path — heals a stale entry after the exe is moved or renamed.
+        // Refresh the launch-at-login entry so it always points at the current
+        // executable path after moves, renames, or self-updates.
         let launch_at_startup = crate::startup::is_enabled();
         if launch_at_startup {
             let _ = crate::startup::set_enabled(true);
@@ -428,16 +430,27 @@ impl App {
                     self.reset_time = info.reset_time;
                     self.week_percent = info.week_percent;
                     self.checking = false;
-                    self.status = if self.active { "Running".into() } else { "Stopped".into() };
+                    self.status = if self.active {
+                        "Running".into()
+                    } else {
+                        "Stopped".into()
+                    };
                     self.last_error = None;
                 }
                 Event::TimerSet(target) => {
                     self.timer_target = Some(target);
                 }
+                Event::TimerCleared => {
+                    self.timer_target = None;
+                }
                 Event::MessageSent(response) => {
                     self.log(&format!("✓ Response: {}", response));
                     self.timer_target = None;
-                    self.status = if self.active { "Running".into() } else { "Stopped".into() };
+                    self.status = if self.active {
+                        "Running".into()
+                    } else {
+                        "Stopped".into()
+                    };
                 }
                 Event::Error(err) => {
                     self.last_error = Some(err.clone());
@@ -594,8 +607,8 @@ impl App {
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         ui.label(egui::RichText::new(&self.status).size(11.0).color(color));
-                        let (rect, _) = ui
-                            .allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
                         ui.painter().circle_filled(rect.center(), 3.5, color);
                     });
             });
@@ -616,67 +629,63 @@ impl App {
 
         let mut action: Option<UpdateBannerAction> = None;
         frame.show(ui, |ui| {
-            ui.horizontal(|ui| {
-                match state {
-                    UpdateState::Available { version, .. } => {
-                        ui.label(
-                            egui::RichText::new(format!("Update v{} available", version))
-                                .size(12.0)
-                                .strong()
-                                .color(TEXT),
-                        );
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if ui.small_button("Later").clicked() {
-                                    action = Some(UpdateBannerAction::Dismiss);
-                                }
-                                if ui
-                                    .add(egui::Button::new(
-                                        egui::RichText::new("Download")
-                                            .size(11.0)
-                                            .color(egui::Color32::WHITE),
-                                    )
-                                    .fill(CLAY))
-                                    .clicked()
-                                {
-                                    action = Some(UpdateBannerAction::Download);
-                                }
-                            },
-                        );
-                    }
-                    UpdateState::Downloading => {
-                        ui.spinner();
-                        ui.label(
-                            egui::RichText::new("Downloading update…")
-                                .size(12.0)
-                                .color(TEXT),
-                        );
-                    }
-                    UpdateState::Ready => {
-                        ui.label(
-                            egui::RichText::new("Update installed")
-                                .size(12.0)
-                                .strong()
-                                .color(TEXT),
-                        );
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if ui
-                                    .add(egui::Button::new(
-                                        egui::RichText::new("Restart now")
-                                            .size(11.0)
-                                            .color(egui::Color32::WHITE),
-                                    )
-                                    .fill(CLAY))
-                                    .clicked()
-                                {
-                                    action = Some(UpdateBannerAction::Restart);
-                                }
-                            },
-                        );
-                    }
+            ui.horizontal(|ui| match state {
+                UpdateState::Available { version, .. } => {
+                    ui.label(
+                        egui::RichText::new(format!("Update v{} available", version))
+                            .size(12.0)
+                            .strong()
+                            .color(TEXT),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("Later").clicked() {
+                            action = Some(UpdateBannerAction::Dismiss);
+                        }
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("Download")
+                                        .size(11.0)
+                                        .color(egui::Color32::WHITE),
+                                )
+                                .fill(CLAY),
+                            )
+                            .clicked()
+                        {
+                            action = Some(UpdateBannerAction::Download);
+                        }
+                    });
+                }
+                UpdateState::Downloading => {
+                    ui.spinner();
+                    ui.label(
+                        egui::RichText::new("Downloading update…")
+                            .size(12.0)
+                            .color(TEXT),
+                    );
+                }
+                UpdateState::Ready => {
+                    ui.label(
+                        egui::RichText::new("Update installed")
+                            .size(12.0)
+                            .strong()
+                            .color(TEXT),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("Restart now")
+                                        .size(11.0)
+                                        .color(egui::Color32::WHITE),
+                                )
+                                .fill(CLAY),
+                            )
+                            .clicked()
+                        {
+                            action = Some(UpdateBannerAction::Restart);
+                        }
+                    });
                 }
             });
         });
@@ -684,9 +693,10 @@ impl App {
         match action {
             Some(UpdateBannerAction::Download) => {
                 if let Some(UpdateState::Available { url, .. }) = &self.update_state {
-                    let _ = self.updater.cmd_tx.send(UpdateCommand::Download {
-                        url: url.clone(),
-                    });
+                    let _ = self
+                        .updater
+                        .cmd_tx
+                        .send(UpdateCommand::Download { url: url.clone() });
                     self.update_state = Some(UpdateState::Downloading);
                 }
             }
@@ -771,17 +781,14 @@ impl App {
 
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Session usage").size(12.0).color(TEXT));
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                ui.label(
-                                    egui::RichText::new(format!("{}%", pct))
-                                        .font(egui::FontId::monospace(12.0))
-                                        .strong()
-                                        .color(bar_color),
-                                );
-                            },
-                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{}%", pct))
+                                    .font(egui::FontId::monospace(12.0))
+                                    .strong()
+                                    .color(bar_color),
+                            );
+                        });
                     });
                     ui.add(
                         egui::ProgressBar::new(pct as f32 / 100.0)
@@ -892,7 +899,10 @@ impl App {
 
     fn render_settings(&mut self, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new(
-            egui::RichText::new("Settings").size(12.5).color(FOG).strong(),
+            egui::RichText::new("Settings")
+                .size(12.5)
+                .color(FOG)
+                .strong(),
         )
         .default_open(false)
         .show(ui, |ui| {
@@ -914,8 +924,7 @@ impl App {
 
                         ui.label(egui::RichText::new("Message").size(11.5).color(FOG));
                         ui.add(
-                            egui::TextEdit::singleline(&mut self.edit_message)
-                                .desired_width(230.0),
+                            egui::TextEdit::singleline(&mut self.edit_message).desired_width(230.0),
                         );
                         ui.end_row();
 
@@ -937,7 +946,11 @@ impl App {
                         });
                         ui.end_row();
 
-                        ui.label(egui::RichText::new("Wait after reset").size(11.5).color(FOG));
+                        ui.label(
+                            egui::RichText::new("Wait after reset")
+                                .size(11.5)
+                                .color(FOG),
+                        );
                         ui.horizontal(|ui| {
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.edit_cooldown)
@@ -947,12 +960,16 @@ impl App {
                         });
                         ui.end_row();
 
-                        // Launch at startup — writes the Windows Run key
+                        // Launch at startup — writes the platform login item
                         // immediately on toggle (independent of Save settings).
-                        ui.label(egui::RichText::new("Launch at startup").size(11.5).color(FOG));
+                        ui.label(
+                            egui::RichText::new("Launch at startup")
+                                .size(11.5)
+                                .color(FOG),
+                        );
                         let mut want_startup = self.launch_at_startup;
                         if ui
-                            .checkbox(&mut want_startup, "Run when Windows starts")
+                            .checkbox(&mut want_startup, crate::startup::checkbox_label())
                             .changed()
                         {
                             match crate::startup::set_enabled(want_startup) {
@@ -975,14 +992,18 @@ impl App {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui
-                        .add(egui::Button::new(egui::RichText::new("Save settings").size(12.0)))
+                        .add(egui::Button::new(
+                            egui::RichText::new("Save settings").size(12.0),
+                        ))
                         .clicked()
                     {
                         self.save_config();
                         self.log("✓ Settings saved");
                     }
                     if ui
-                        .add(egui::Button::new(egui::RichText::new("Reset to defaults").size(12.0)))
+                        .add(egui::Button::new(
+                            egui::RichText::new("Reset to defaults").size(12.0),
+                        ))
                         .clicked()
                     {
                         self.reset_settings_to_defaults();
@@ -994,74 +1015,72 @@ impl App {
     }
 
     fn render_log(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new(
-            egui::RichText::new("Log").size(12.5).color(FOG).strong(),
-        )
-        .default_open(false)
-        .show(ui, |ui| {
-            egui::Frame::none()
-                .fill(WELL)
-                .stroke(egui::Stroke::new(1.0_f32, EDGE))
-                .rounding(10.0)
-                .inner_margin(12.0)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(format!("{} events", self.log_entries.len()))
-                                .size(10.5)
-                                .color(FOG),
-                        );
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if ui.small_button("Clear").clicked() {
-                                    self.log_entries.clear();
-                                }
-                                if ui.small_button("Copy").clicked() {
-                                    let text = self
-                                        .log_entries
-                                        .iter()
-                                        .cloned()
-                                        .collect::<Vec<_>>()
-                                        .join("\n");
-                                    ui.output_mut(|o| o.copied_text = text);
-                                }
-                            },
-                        );
-                    });
-                    ui.add_space(4.0);
-
-                    egui::ScrollArea::vertical()
-                        .max_height(160.0)
-                        .stick_to_bottom(true)
-                        .show(ui, |ui| {
-                            if self.log_entries.is_empty() {
-                                ui.label(
-                                    egui::RichText::new("Nothing yet — events land here.")
-                                        .size(11.0)
-                                        .color(FOG)
-                                        .italics(),
-                                );
-                            }
-                            for entry in &self.log_entries {
-                                let color = if entry.contains('✓') || entry.contains('▶') {
-                                    MINT
-                                } else if entry.contains('⚠') {
-                                    AMBER
-                                } else if entry.contains('✗') {
-                                    RED
-                                } else {
-                                    FOG
-                                };
-                                ui.label(
-                                    egui::RichText::new(entry)
-                                        .color(color)
-                                        .font(egui::FontId::monospace(11.0)),
-                                );
-                            }
+        egui::CollapsingHeader::new(egui::RichText::new("Log").size(12.5).color(FOG).strong())
+            .default_open(false)
+            .show(ui, |ui| {
+                egui::Frame::none()
+                    .fill(WELL)
+                    .stroke(egui::Stroke::new(1.0_f32, EDGE))
+                    .rounding(10.0)
+                    .inner_margin(12.0)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{} events", self.log_entries.len()))
+                                    .size(10.5)
+                                    .color(FOG),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.small_button("Clear").clicked() {
+                                        self.log_entries.clear();
+                                    }
+                                    if ui.small_button("Copy").clicked() {
+                                        let text = self
+                                            .log_entries
+                                            .iter()
+                                            .cloned()
+                                            .collect::<Vec<_>>()
+                                            .join("\n");
+                                        ui.output_mut(|o| o.copied_text = text);
+                                    }
+                                },
+                            );
                         });
-                });
-        });
+                        ui.add_space(4.0);
+
+                        egui::ScrollArea::vertical()
+                            .max_height(160.0)
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                if self.log_entries.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new("Nothing yet — events land here.")
+                                            .size(11.0)
+                                            .color(FOG)
+                                            .italics(),
+                                    );
+                                }
+                                for entry in &self.log_entries {
+                                    let color = if entry.contains('✓') || entry.contains('▶') {
+                                        MINT
+                                    } else if entry.contains('⚠') {
+                                        AMBER
+                                    } else if entry.contains('✗') {
+                                        RED
+                                    } else {
+                                        FOG
+                                    };
+                                    ui.label(
+                                        egui::RichText::new(entry)
+                                            .color(color)
+                                            .font(egui::FontId::monospace(11.0)),
+                                    );
+                                }
+                            });
+                    });
+            });
     }
 }
 

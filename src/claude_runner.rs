@@ -3,6 +3,7 @@
 //! Runs `claude` commands via `std::process::Command` with
 //! `CREATE_NO_WINDOW` on Windows to prevent console flash.
 
+use std::path::Path;
 use std::process::Command;
 
 #[cfg(windows)]
@@ -33,8 +34,7 @@ impl ClaudeRunner {
     }
 
     fn run_command(&self, args: &[&str]) -> Result<String, String> {
-        let mut cmd = Command::new(&self.claude_path);
-        cmd.args(args);
+        let mut cmd = self.command(args);
 
         // Suppress console window on Windows
         #[cfg(windows)]
@@ -56,4 +56,33 @@ impl ClaudeRunner {
             ))
         }
     }
+
+    fn command(&self, args: &[&str]) -> Command {
+        #[cfg(not(windows))]
+        {
+            if should_run_via_login_shell(&self.claude_path) {
+                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+                let mut cmd = Command::new(shell);
+                cmd.arg("-lc")
+                    .arg(format!("exec {} \"$@\"", shell_quote(&self.claude_path)))
+                    .arg("claude-timer-reset")
+                    .args(args);
+                return cmd;
+            }
+        }
+
+        let mut cmd = Command::new(&self.claude_path);
+        cmd.args(args);
+        cmd
+    }
+}
+
+#[cfg(not(windows))]
+fn should_run_via_login_shell(program: &str) -> bool {
+    !Path::new(program).is_absolute() && !program.contains('/')
+}
+
+#[cfg(not(windows))]
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }

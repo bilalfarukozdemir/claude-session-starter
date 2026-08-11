@@ -1,6 +1,5 @@
-//! Persistent file log — `app.log` in the per-user app-data directory
-//! (`%LOCALAPPDATA%\claude-timer-reset` on Windows, `~/.claude-timer-reset`
-//! elsewhere), so the app's own folder stays clean.
+//! Persistent file log — `app.log` in the per-user app-data directory, so the
+//! app's own folder stays clean.
 //!
 //! Every scheduler event is appended here so problems can be diagnosed
 //! even when the UI is hidden in the tray. The file self-trims: once it
@@ -21,39 +20,17 @@ pub fn log_path() -> PathBuf {
 }
 
 fn init_log_path() -> PathBuf {
-    let path = app_data_dir().join("app.log");
+    let path = crate::config::app_data_dir().join("app.log");
     migrate_legacy_log(&path);
     path
-}
-
-/// Per-user data directory, created on first use. Falls back to the exe's
-/// directory when the platform env var is missing.
-fn app_data_dir() -> PathBuf {
-    let base = if cfg!(windows) {
-        std::env::var("LOCALAPPDATA").ok()
-    } else {
-        std::env::var("HOME").ok()
-    };
-    if let Some(base) = base {
-        let dir = if cfg!(windows) {
-            PathBuf::from(base).join("claude-timer-reset")
-        } else {
-            PathBuf::from(base).join(".claude-timer-reset")
-        };
-        if fs::create_dir_all(&dir).is_ok() {
-            return dir;
-        }
-    }
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// One-time move of the old `app.log` that used to live next to the exe.
 /// Copy + delete (rename fails across volumes); all errors ignored.
 fn migrate_legacy_log(new_path: &Path) {
-    let Ok(exe) = std::env::current_exe() else { return };
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
     let Some(old) = exe.parent().map(|d| d.join("app.log")) else {
         return;
     };

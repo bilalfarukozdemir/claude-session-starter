@@ -2,7 +2,7 @@
 name = "claude-timer-reset"
 version = "1.2.5"
 edition = "2021"
-description = "Lightweight Windows app for Claude CLI session scheduling and auto-restart"
+description = "Lightweight desktop app for Claude CLI session scheduling and auto-restart"
 
 [dependencies]
 eframe = "0.29"

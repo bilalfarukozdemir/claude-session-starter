@@ -19,6 +19,8 @@ pub enum Event {
     UsageChecked(UsageInfo),
     /// Timer target set for this time
     TimerSet(DateTime<Local>),
+    /// No valid timer can be scheduled from the latest usage check
+    TimerCleared,
     /// Claude responded to our test message
     MessageSent(String),
     /// Something went wrong
@@ -113,8 +115,13 @@ fn scheduler_loop(
                 Ok(Command::CheckNow) => {
                     force_check = true;
                 }
-                Ok(Command::UpdateConfig { claude_path: cp, model: m, message: msg,
-                    check_interval_minutes: ci, cooldown_seconds: cs }) => {
+                Ok(Command::UpdateConfig {
+                    claude_path: cp,
+                    model: m,
+                    message: msg,
+                    check_interval_minutes: ci,
+                    cooldown_seconds: cs,
+                }) => {
                     claude_path = cp;
                     model = m;
                     message = msg;
@@ -150,35 +157,60 @@ fn scheduler_loop(
                                 // the *weekly* reset on the session line, seen on older
                                 // CLI versions when no session was active.
                                 Some(reset) if reset - now <= chrono::Duration::hours(24) => {
-                                    let target = reset
-                                        + chrono::Duration::seconds(cooldown_seconds as i64);
+                                    let target =
+                                        reset + chrono::Duration::seconds(cooldown_seconds as i64);
                                     timer_target = Some(target);
 
                                     emit(&tx, Event::UsageChecked(info));
                                     emit(&tx, Event::TimerSet(target));
-                                    emit(&tx, Event::Log(format!(
-                                        "⏰ Reset: {} → Timer: {}",
-                                        reset.format("%H:%M"),
-                                        target.format("%H:%M:%S")
-                                    )));
+                                    emit(
+                                        &tx,
+                                        Event::Log(format!(
+                                            "⏰ Reset: {} → Timer: {}",
+                                            reset.format("%H:%M"),
+                                            target.format("%H:%M:%S")
+                                        )),
+                                    );
                                 }
-                                // No reset clause at all (fresh window: CLI omits
-                                // "resets ..." entirely) or a >24h one (weekly reset
-                                // quirk) — either way no session is active.
+                                // No reset clause at all can mean either a fresh
+                                // window (0%) or a CLI output format we do not
+                                // understand yet. Only auto-start on 0%; otherwise
+                                // wait for a future check instead of spamming prompts.
                                 _ => {
+                                    let has_usage = info.session_percent > 0;
                                     emit(&tx, Event::UsageChecked(info));
-                                    if active {
-                                        emit(&tx, Event::Log(
-                                            "💤 No active session — starting one now".into(),
+                                    if active && has_usage {
+                                        timer_target = None;
+                                        emit(&tx, Event::TimerCleared);
+                                        emit(
+                                            &tx,
+                                            Event::Log(
+                                                "⚠ Reset time not found — waiting for the next check"
+                                                    .into(),
+                                            ),
+                                        );
+                                        crate::logger::log(&format!(
+                                            "RAW /usage output without reset time:\n{}",
+                                            output
                                         ));
+                                    } else if active {
+                                        emit(
+                                            &tx,
+                                            Event::Log(
+                                                "💤 No active session — starting one now".into(),
+                                            ),
+                                        );
                                         // Fires in the timer check below
                                         timer_target = Some(now);
                                         emit(&tx, Event::TimerSet(now));
                                     } else {
-                                        emit(&tx, Event::Log(
-                                            "💤 No active session (press Start to open one)"
-                                                .into(),
-                                        ));
+                                        emit(
+                                            &tx,
+                                            Event::Log(
+                                                "💤 No active session (press Start to open one)"
+                                                    .into(),
+                                            ),
+                                        );
                                     }
                                 }
                             }
@@ -202,17 +234,17 @@ fn scheduler_loop(
                     }
                 }
 
-                next_check =
-                    now_instant + Duration::from_secs(check_interval_minutes as u64 * 60);
+                next_check = now_instant + Duration::from_secs(check_interval_minutes as u64 * 60);
             }
 
             // ── Timer check (only fires in autonomous mode) ──
             if let Some(target) = timer_target.filter(|_| active) {
                 if Local::now() >= target {
                     timer_target = None;
-                    emit(&tx, Event::Log(
-                        "🤖 Session reset! Sending message...".into(),
-                    ));
+                    emit(
+                        &tx,
+                        Event::Log("🤖 Session reset! Sending message...".into()),
+                    );
 
                     let runner = ClaudeRunner::new(&claude_path);
                     match runner.send_message(&model, &message) {
@@ -245,6 +277,7 @@ fn emit(tx: &mpsc::Sender<Event>, ev: Event) {
             i.session_percent, i.reset_time, i.week_percent
         ),
         Event::TimerSet(t) => format!("timer set → {}", t.format("%Y-%m-%d %H:%M:%S")),
+        Event::TimerCleared => "timer cleared".into(),
         Event::MessageSent(r) => format!("message sent · response: {}", r),
         Event::Error(e) => format!("ERROR: {}", e),
         Event::Log(m) => m.clone(),

@@ -129,9 +129,7 @@ fn check_latest() -> Result<Option<(String, String)>, String> {
     let json: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| format!("bad JSON: {}", e))?;
 
-    let tag = json["tag_name"]
-        .as_str()
-        .ok_or("no tag_name in release")?;
+    let tag = json["tag_name"].as_str().ok_or("no tag_name in release")?;
     let latest = tag.trim_start_matches('v');
 
     if !is_newer(latest, env!("CARGO_PKG_VERSION")) {
